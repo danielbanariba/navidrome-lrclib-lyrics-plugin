@@ -1,13 +1,17 @@
 {
   "name": "LRCLIB Lyrics",
   "author": "danielbanariba",
-  "version": "0.1.0",
-  "description": "Fetches synced (LRC) and plain lyrics from LRCLIB (lrclib.net).",
+  "version": "0.2.0",
+  "description": "Fetches synced (LRC) and plain lyrics from LRCLIB (lrclib.net), with KVStore caching.",
   "website": "https://github.com/danielbanariba/navidrome-lrclib-lyrics-plugin",
   "permissions": {
     "http": {
       "reason": "Fetch lyrics from the LRCLIB public API.",
       "requiredHosts": ["lrclib.net"]
+    },
+    "kvstore": {
+      "reason": "Cache fetched lyrics so repeated lookups are instant (LRCLIB is slow, ~7-10s per request).",
+      "maxSize": "25MB"
     }
   }
 }

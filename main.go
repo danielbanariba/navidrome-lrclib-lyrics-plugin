@@ -5,21 +5,20 @@
 // raw lyrics string verbatim; Navidrome parses LRC timestamps host-side
 // (model.ToLyrics), so the plugin must NOT build synced-line structures itself.
 //
-// Build (see Makefile):
+// LRCLIB's API is functional but slow (~7-10s per request, server-side), so
+// results are cached in the per-plugin KVStore: the first lookup for a track
+// pays the LRCLIB latency, every subsequent lookup is served from cache.
 //
-//	make                 # produces lrclib.ndp
-//
-// or manually:
-//
-//	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
-//	zip -j lrclib.ndp manifest.json plugin.wasm
+// Build (see Makefile): make            # produces lrclib.ndp
 package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
 	"github.com/navidrome/navidrome/plugins/pdk/go/lyrics"
@@ -27,9 +26,20 @@ import (
 )
 
 const (
-	apiBase       = "https://lrclib.net/api"
-	userAgent     = "navidrome-lrclib-lyrics-plugin/0.1.0 (https://github.com/danielbanariba/navidrome-lrclib-lyrics-plugin)"
-	httpTimeoutMs = 10000
+	apiBase   = "https://lrclib.net/api"
+	userAgent = "navidrome-lrclib-lyrics-plugin/0.2.0 (https://github.com/danielbanariba/navidrome-lrclib-lyrics-plugin)"
+	// LRCLIB is slow (~7-10s server-side); give a single request enough room to
+	// complete instead of timing out and paying the fallback search on top.
+	httpTimeoutMs = 15000
+
+	cachePrefix = "lrclib:v1:"
+	// Lyrics rarely change, so cache hits live a long time. Misses expire sooner
+	// so newly-added LRCLIB lyrics get picked up without a manual cache clear.
+	ttlHitSeconds  int64 = 30 * 24 * 60 * 60 // 30 days
+	ttlMissSeconds int64 = 7 * 24 * 60 * 60  // 7 days
+
+	cacheValHit  byte = 'H' // value is 'H' + raw lyrics text
+	cacheValMiss byte = 'M' // value is 'M' (no lyrics for this track)
 )
 
 // lrclibTrack is the subset of the LRCLIB response we consume.
@@ -54,40 +64,50 @@ func init() {
 	lyrics.Register(&lrclibPlugin{})
 }
 
-// GetLyrics looks up lyrics for the given track on LRCLIB. It first tries an
-// exact /api/get match (artist + track + album + duration); if that misses, it
-// falls back to /api/search by track + artist. An empty response tells Navidrome
-// to move on to the next lyrics source.
+// GetLyrics looks up lyrics for the given track, serving from the KVStore cache
+// when possible and falling back to LRCLIB otherwise.
 func (p *lrclibPlugin) GetLyrics(req lyrics.GetLyricsRequest) (lyrics.GetLyricsResponse, error) {
 	t := req.Track
+	if t.Title == "" {
+		return lyrics.GetLyricsResponse{}, nil
+	}
 
 	artist := t.Artist
 	if artist == "" && len(t.Artists) > 0 {
 		artist = t.Artists[0].Name
 	}
 
-	track := p.lookup(t.Title, artist, t.Album, t.Duration)
-	if track == nil {
-		return lyrics.GetLyricsResponse{}, nil
+	key := cacheKey(artist, t.Title, t.Album, t.Duration)
+
+	// 1) Cache: a hit (lyrics or a recorded miss) avoids the slow LRCLIB call.
+	if text, found, miss := cacheGet(key); found {
+		if miss {
+			return lyrics.GetLyricsResponse{}, nil
+		}
+		return response(text), nil
 	}
 
-	text := pickLyrics(track)
+	// 2) Miss: query LRCLIB, then record the result (text or miss) for next time.
+	text := ""
+	if track := p.lookup(t.Title, artist, t.Album, t.Duration); track != nil {
+		text = pickLyrics(track)
+	}
+	cacheStore(key, text)
+
 	if text == "" {
 		return lyrics.GetLyricsResponse{}, nil
 	}
+	return response(text), nil
+}
 
-	// Raw text (plain or LRC). LRCLIB does not expose a language, so Lang is left
-	// empty; the host defaults it to "xxx".
-	return lyrics.GetLyricsResponse{
-		Lyrics: []lyrics.LyricsText{{Text: text}},
-	}, nil
+func response(text string) lyrics.GetLyricsResponse {
+	// Raw text (plain or LRC). LRCLIB has no language, so Lang is left empty;
+	// the host defaults it to "xxx".
+	return lyrics.GetLyricsResponse{Lyrics: []lyrics.LyricsText{{Text: text}}}
 }
 
 // lookup tries the exact endpoint first, then the search fallback.
 func (p *lrclibPlugin) lookup(title, artist, album string, duration float32) *lrclibTrack {
-	if title == "" {
-		return nil
-	}
 	if track, err := p.apiGet(title, artist, album, duration); err != nil {
 		pdk.Log(pdk.LogWarn, fmt.Sprintf("lrclib: /api/get error: %v", err))
 	} else if track != nil {
@@ -189,6 +209,59 @@ func pickLyrics(t *lrclibTrack) string {
 		return t.SyncedLyrics
 	}
 	return t.PlainLyrics
+}
+
+// cacheKey derives a fixed-length KVStore key (the store caps keys at 256 bytes,
+// so the normalized fields are hashed rather than concatenated).
+func cacheKey(artist, title, album string, duration float32) string {
+	h := fnv.New64a()
+	write := func(s string) {
+		_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(s))))
+		_, _ = h.Write([]byte{0})
+	}
+	write(artist)
+	write(title)
+	write(album)
+	_, _ = h.Write([]byte(strconv.Itoa(int(duration + 0.5))))
+	return cachePrefix + strconv.FormatUint(h.Sum64(), 16)
+}
+
+// cacheGet returns (text, found, miss). found=false means "not cached"; miss=true
+// means we previously recorded that LRCLIB has no lyrics for this track.
+func cacheGet(key string) (string, bool, bool) {
+	val, ok, err := host.KVStoreGet(key)
+	if err != nil {
+		pdk.Log(pdk.LogWarn, "lrclib: cache get failed: "+err.Error())
+		return "", false, false
+	}
+	if !ok || len(val) == 0 {
+		return "", false, false
+	}
+	switch val[0] {
+	case cacheValMiss:
+		return "", true, true
+	case cacheValHit:
+		return string(val[1:]), true, false
+	default:
+		return "", false, false
+	}
+}
+
+// cacheStore records lyrics (or a miss) in the KVStore. Cache failures are
+// non-fatal — lyrics were already fetched, so we just skip persisting.
+func cacheStore(key, text string) {
+	var val []byte
+	var ttl int64
+	if text == "" {
+		val = []byte{cacheValMiss}
+		ttl = ttlMissSeconds
+	} else {
+		val = append([]byte{cacheValHit}, text...)
+		ttl = ttlHitSeconds
+	}
+	if err := host.KVStoreSetWithTTL(key, val, ttl); err != nil {
+		pdk.Log(pdk.LogWarn, "lrclib: cache store failed: "+err.Error())
+	}
 }
 
 func main() {}

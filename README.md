@@ -10,11 +10,22 @@ It implements Navidrome's `Lyrics` plugin capability. The plugin returns LRCLIB'
 
 For each lyrics request Navidrome sends the track's metadata, and the plugin:
 
-1. Tries an exact match via `GET /api/get` using `artist_name`, `track_name`, `album_name` and `duration`.
-2. Falls back to `GET /api/search` (by track + artist) if the exact match misses.
-3. Prefers **synced** lyrics; uses **plain** lyrics otherwise; returns nothing for instrumental tracks (so Navidrome moves on to the next source).
+1. **Checks its KVStore cache** first — a hit (lyrics, or a recorded "no lyrics") is returned immediately, without touching the network.
+2. On a miss, tries an exact match via `GET /api/get` using `artist_name`, `track_name`, `album_name` and `duration`.
+3. Falls back to `GET /api/search` (by track + artist) if the exact match misses.
+4. Prefers **synced** lyrics; uses **plain** lyrics otherwise; returns nothing for instrumental tracks (so Navidrome moves on to the next source).
+5. Caches the result (lyrics for 30 days, misses for 7 days) so the next lookup for that track is instant.
 
-LRCLIB requires **no API key** and has **no rate limit**. The plugin only needs outbound HTTP to `lrclib.net`.
+LRCLIB requires **no API key** and has **no rate limit**. The plugin needs outbound HTTP to `lrclib.net` and the `kvstore` permission for its cache.
+
+### Caching
+
+LRCLIB's API is functional but **slow server-side** (~7–10 s per request — measured against the live API, independent of Navidrome). To keep that cost off the hot path, results are stored in the plugin's isolated KVStore:
+
+- First lookup for a track: pays the LRCLIB latency once (~7–10 s).
+- Every subsequent lookup for that track: served from cache in **single-digit milliseconds** (~800× faster, verified end-to-end).
+
+The cache is capped at 25 MB (`permissions.kvstore.maxSize`); cache write failures are non-fatal — lyrics are still returned, they just aren't persisted.
 
 ## Build
 
@@ -64,7 +75,7 @@ make TINYGO=~/.local/tinygo-0.41.1/bin/tinygo
 ## Notes
 
 - LRCLIB does not expose a language, so the `lang` field is reported as `xxx`.
-- The first lyrics lookup after a plugin (re)load can be slow while the WASM sandbox warms up its HTTP/TLS path; subsequent lookups are faster.
+- The first lookup for any track is slow because LRCLIB itself is slow (~7–10 s, server-side — not the plugin or the WASM sandbox). The cache makes every later lookup for that track instant.
 
 ## Credits
 

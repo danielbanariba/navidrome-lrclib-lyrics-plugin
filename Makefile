@@ -1,16 +1,19 @@
 PLUGIN := lrclib
 
-# NOTE: TinyGo 0.37 does not yet support Go 1.26, so this Makefile uses the
-# standard Go wasip1 toolchain (Go 1.24+ supports //go:wasmexport and
-# -buildmode=c-shared). If you have a TinyGo build that matches your Go version,
-# `tinygo build -o plugin.wasm -target wasip1 -buildmode=c-shared .` also works.
+# Build requires TinyGo. Use TinyGo 0.41.1+ — it must support the Go version the
+# Navidrome plugin PDK requires (currently Go 1.25+). TinyGo 0.37 does NOT work:
+# it caps at Go 1.24, while the PDK's go.mod requires `go >= 1.25`.
+#
+# Override the binary if TinyGo is not on your PATH, e.g.:
+#   make TINYGO=~/.local/tinygo-0.41.1/bin/tinygo
+TINYGO ?= tinygo
 
 .PHONY: all clean
 
 all: $(PLUGIN).ndp
 
 plugin.wasm: main.go manifest.json go.mod
-	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
+	$(TINYGO) build -o plugin.wasm -target wasip1 -buildmode=c-shared .
 
 $(PLUGIN).ndp: plugin.wasm manifest.json
 	zip -j $(PLUGIN).ndp manifest.json plugin.wasm

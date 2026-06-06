@@ -4,6 +4,8 @@ A [Navidrome](https://www.navidrome.org/) plugin that fetches **synced (LRC)** a
 
 It implements Navidrome's `Lyrics` plugin capability. The plugin returns LRCLIB's raw lyrics string verbatim — Navidrome parses LRC timestamps host-side, so synced lyrics "just work".
 
+> Verified end-to-end against Navidrome 0.61.2: the plugin loads with `capabilities=[Lyrics]` and returns synced lyrics from LRCLIB.
+
 ## How it works
 
 For each lyrics request Navidrome sends the track's metadata, and the plugin:
@@ -16,25 +18,40 @@ LRCLIB requires **no API key** and has **no rate limit**. The plugin only needs 
 
 ## Build
 
-Requires Go 1.24+ (for `//go:wasmexport` + `-buildmode=c-shared` on `wasip1`).
+Requires **TinyGo 0.41.1 or newer**. TinyGo must support the Go version the Navidrome PDK requires (currently Go 1.25+).
+
+> ⚠️ TinyGo **0.37 does not work**: it only supports Go ≤ 1.24, while the plugin PDK's `go.mod` requires `go >= 1.25`. If your distro ships an old TinyGo, grab a recent release from <https://github.com/tinygo-org/tinygo/releases>.
 
 ```sh
 make            # produces lrclib.ndp
+# or, if TinyGo isn't on PATH:
+make TINYGO=~/.local/tinygo-0.41.1/bin/tinygo
 ```
-
-> TinyGo also works if your TinyGo version supports your Go toolchain. As of this writing TinyGo 0.37 does not support Go 1.26, so the `Makefile` uses the standard Go `wasip1` toolchain. Both produce a compatible WASM module.
 
 ## Install
 
-1. Copy `lrclib.ndp` into your Navidrome plugins folder (`Plugins.Folder`, default `<DataFolder>/plugins`).
-2. Make sure plugins are enabled in `navidrome.toml`:
+1. **Build** `lrclib.ndp` (above) and copy it into your Navidrome plugins folder (`Plugins.Folder`, default `<DataFolder>/plugins`).
+
+2. **Enable the plugin system** in `navidrome.toml`:
 
    ```toml
    [Plugins]
    Enabled = true
    ```
 
-3. **Add the plugin to your lyrics priority** — this is required, otherwise the plugin is never consulted. The default `LyricsPriority` is `embedded,.lrc,.txt` and contains no plugin:
+   On versions where the plugin system is still experimental, also set the top-level flag:
+
+   ```toml
+   DevEnablePlugins = true
+   ```
+
+3. **Enable this plugin.** Plugins are registered **disabled** by default — this step is required, or the plugin is never loaded. Enable `lrclib` from the Navidrome admin UI (Settings → Plugins), or via the Native API. You can confirm it loaded when the log shows:
+
+   ```
+   Loaded plugin  capabilities="[Lyrics]"  plugin=lrclib
+   ```
+
+4. **Add the plugin to your lyrics priority.** The default `LyricsPriority` (`embedded,.lrc,.txt`) contains no plugin, so the plugin would never be consulted:
 
    ```toml
    LyricsPriority = "embedded,.lrc,.txt,lrclib"
@@ -42,7 +59,12 @@ make            # produces lrclib.ndp
 
    (`lrclib` is the plugin id, derived from the `.ndp` filename.)
 
-4. Restart Navidrome (or rely on `Plugins.AutoReload`).
+5. **Restart** Navidrome (or rely on `Plugins.AutoReload`). Note: changing the `.ndp` file re-registers the plugin as **disabled**, so re-enable it after replacing the file.
+
+## Notes
+
+- LRCLIB does not expose a language, so the `lang` field is reported as `xxx`.
+- The first lyrics lookup after a plugin (re)load can be slow while the WASM sandbox warms up its HTTP/TLS path; subsequent lookups are faster.
 
 ## Credits
 

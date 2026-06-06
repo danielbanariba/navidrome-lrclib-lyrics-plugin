@@ -226,6 +226,29 @@ func cacheKey(artist, title, album string, duration float32) string {
 	return cachePrefix + strconv.FormatUint(h.Sum64(), 16)
 }
 
+// encodeCacheValue serializes a cache entry: 'H'+text for a hit, 'M' for a miss.
+func encodeCacheValue(text string) []byte {
+	if text == "" {
+		return []byte{cacheValMiss}
+	}
+	return append([]byte{cacheValHit}, text...)
+}
+
+// decodeCacheValue parses a stored cache entry. ok=false for unrecognized bytes.
+func decodeCacheValue(val []byte) (text string, miss bool, ok bool) {
+	if len(val) == 0 {
+		return "", false, false
+	}
+	switch val[0] {
+	case cacheValMiss:
+		return "", true, true
+	case cacheValHit:
+		return string(val[1:]), false, true
+	default:
+		return "", false, false
+	}
+}
+
 // cacheGet returns (text, found, miss). found=false means "not cached"; miss=true
 // means we previously recorded that LRCLIB has no lyrics for this track.
 func cacheGet(key string) (string, bool, bool) {
@@ -234,32 +257,24 @@ func cacheGet(key string) (string, bool, bool) {
 		pdk.Log(pdk.LogWarn, "lrclib: cache get failed: "+err.Error())
 		return "", false, false
 	}
-	if !ok || len(val) == 0 {
+	if !ok {
 		return "", false, false
 	}
-	switch val[0] {
-	case cacheValMiss:
-		return "", true, true
-	case cacheValHit:
-		return string(val[1:]), true, false
-	default:
+	text, miss, decoded := decodeCacheValue(val)
+	if !decoded {
 		return "", false, false
 	}
+	return text, true, miss
 }
 
 // cacheStore records lyrics (or a miss) in the KVStore. Cache failures are
 // non-fatal — lyrics were already fetched, so we just skip persisting.
 func cacheStore(key, text string) {
-	var val []byte
-	var ttl int64
+	ttl := ttlHitSeconds
 	if text == "" {
-		val = []byte{cacheValMiss}
 		ttl = ttlMissSeconds
-	} else {
-		val = append([]byte{cacheValHit}, text...)
-		ttl = ttlHitSeconds
 	}
-	if err := host.KVStoreSetWithTTL(key, val, ttl); err != nil {
+	if err := host.KVStoreSetWithTTL(key, encodeCacheValue(text), ttl); err != nil {
 		pdk.Log(pdk.LogWarn, "lrclib: cache store failed: "+err.Error())
 	}
 }

@@ -1,0 +1,13 @@
+{
+  "name": "LRCLIB Lyrics",
+  "author": "danielbanariba",
+  "version": "0.1.0",
+  "description": "Fetches synced (LRC) and plain lyrics from LRCLIB (lrclib.net).",
+  "website": "https://github.com/danielbanariba/navidrome-lrclib-lyrics-plugin",
+  "permissions": {
+    "http": {
+      "reason": "Fetch lyrics from the LRCLIB public API.",
+      "requiredHosts": ["lrclib.net"]
+    }
+  }
+}
